@@ -1,0 +1,62 @@
+name: "Build AMIs for AlmaLinux"
+on: workflow_dispatch
+
+env:
+  PACKER_VERSION: 1.10.0
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        build_versions:
+        - almalinux_8_ami_x86_64
+        - almalinux_8_ami_aarch64
+        # - almalinux_9_ami_x86_64
+        # - almalinux_9_ami_aarch64
+        # - almalinux_kitten_10_ami_x86_64
+        # - almalinux_kitten_10_ami_aarch64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install jq unzip -y
+
+      - name: Setup Packer
+        uses: hashicorp/setup-packer@main
+        id: setup
+        with:
+          packer_version: ${{ env.PACKER_VERSION }}
+      
+      - name: Update Packer plugins
+        run: |
+          packer init -upgrade .
+      
+      - name: Build AMI
+        id: build
+        run: |
+          packer build --only=amazon-ebssurrogate.${{ matrix.build_versions }} .
+        env:
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+      - name: Extract AMI ID
+        id: extract_ami_id
+        run: |
+          AMI_ID=$(jq -r '.builds[-1].artifact_id | split(":") | .[1]' manifest.json)
+          echo "AMI_ID=${AMI_ID}" >> $GITHUB_ENV
+
+      - name: Test AMI
+        id: test
+        run: |
+          echo "Testing AMI: ${{ env.AMI_ID }}"
+          # TODO: Add tests here
+      
+      - name: Report AMI ID
+        run: |
+          echo "${{matrix.build_version}},${{ secrets.AWS_REGION }},${{ env.AMI_ID }}" >> GITHUB_STEP_SUMMARY
