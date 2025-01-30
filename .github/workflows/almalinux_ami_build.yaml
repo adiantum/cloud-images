@@ -1,0 +1,157 @@
+name: "Build AMIs for AlmaLinux"
+on: workflow_dispatch
+
+env:
+  PACKER_VERSION: 1.10.0
+
+jobs:
+  define-matrix:
+    runs-on: ubuntu-latest
+    env:
+      matrix: |
+        [
+          \"almalinux_8_ami_x86_64\",
+          \"almalinux_8_ami_aarch64\"
+        ]
+    outputs:
+      build_version: ${{ steps.set-matrix.outputs.build_version }}
+    steps:
+      - name: Set matrix
+        id: set-matrix
+        run: MATRIXLINE=$(echo "${{ env.matrix }}" | awk '{printf "%s", $0}') && echo "build_version=$MATRIXLINE" >> "$GITHUB_OUTPUT"
+
+  # check_matrix:
+  #   runs-on: ubuntu-latest
+  #   needs: define-matrix
+  #   steps:
+  #     - name: Show matrix text
+  #       run: |
+  #         echo "Matrix: ${{ needs.define-matrix.outputs.build_version }}"
+
+  #     - name: Show matrix
+  #       run: |
+  #         echo "Matrix: ${{ fromJSON(needs.define-matrix.outputs.build_version) }}"
+
+        # - almalinux_8_ami_x86_64
+        # - almalinux_8_ami_aarch64
+        # - almalinux_9_ami_x86_64
+        # - almalinux_9_ami_aarch64
+        # - almalinux_kitten_10_ami_x86_64
+        # - almalinux_kitten_10_ami_aarch64
+
+  build:
+    runs-on: ubuntu-latest
+    needs: define-matrix
+    strategy:
+      matrix:
+        build_version: ${{ fromJSON(needs.define-matrix.outputs.build_version) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Create dir for build specs
+        run: |
+          mkdir -p ./ga_build_specs
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install jq unzip -y
+
+      - name: Setup Packer
+        uses: hashicorp/setup-packer@main
+        id: setup
+        with:
+          version: ${{ env.PACKER_VERSION }}
+      
+      - name: Update Packer plugins
+        run: |
+          packer init .
+
+      - name: Build AMI
+        id: build
+        run: |
+          packer build --only=amazon-ebssurrogate.${{ matrix.build_version }} .
+        env:
+          AWS_REGION: ${{ env.AWS_REGION }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+      - name: Extract AMI ID
+        run: |
+          AMI_ID=$(jq -r '.builds[-1].artifact_id | split(":") | .[1]' manifest.json)
+          echo "AMI_ID=${AMI_ID}" >> $GITHUB_ENV
+
+      - name: Save AMI ID
+        run: |
+          echo "Saving AMI ID"
+          echo "${{ env.AMI_ID }}" >> "${{ matrix.build_version }}.amitxt"
+
+      - name: Test AMI
+        id: test
+        run: |
+          echo "Testing AMI: ${{ env.AMI_ID }}"
+          # TODO: Add tests here
+
+      - name: Upload AMI ID
+        uses: actions/upload-artifact@v4
+        with:
+          name: ami_id-${{ matrix.build_version }}
+          path: ./${{ matrix.build_version }}.amitxt      
+
+  distribute:
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Python3
+        run: |
+          sudo apt-get update
+          sudo apt-get install python3-pip -y
+
+      - name: Install Python requirements
+        working-directory: ./tools
+        run: |
+          pip3 install -r requirements-aws.txt
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: "ami_id-*"
+          path: ./
+
+      - name: Prepare amitxt files
+        run: |
+          for file in $(ls ami_id-*/*.amitxt); do
+            mv $file ./tools/
+          done
+
+      - name: Distribute AMI
+        working-directory: ./tools
+        id: distribute
+        env:
+          AWS_REGION: ${{ vars.AWS_REGION }}
+          AWS_DEFAULT_REGION: ${{ vars.AWS_REGION }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        run: |
+          echo "Distributing AMIs"
+          for file in $(ls *.amitxt); do
+            ami_id=$(cat $file)
+            echo "Distributing AMI: $ami_id from $AWS_REGION"
+            python3 aws_ami_mirror.py --ami $ami_id --csv-output ami_distribution.csv --md-output ami_distribution.md
+          done
+
+      - name: Upload AMI distribution CSV
+        uses: actions/upload-artifact@v4
+        with:
+          name: ami_distribution_csv
+          path: ./tools/ami_distribution.csv
+
+      - name: Upload AMI distribution report
+        uses: actions/upload-artifact@v4
+        with:
+          name: ami_distribution_report
+          path: ./tools/ami_distribution.md

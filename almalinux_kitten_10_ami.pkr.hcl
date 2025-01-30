@@ -121,4 +121,10 @@ build {
     galaxy_file   = "./ansible/requirements.yml"
     only          = ["amazon-ebssurrogate.almalinux_kitten_10_ami_aarch64"]
   }
+
+  post-processor "manifest" {
+    output = "manifest.json"
+    strip_path = true
+  }
+
 }
